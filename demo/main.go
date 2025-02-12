@@ -9,6 +9,8 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+var version string
+
 func printTextTable(data [][]string) {
 	var lengths = make([]int, len(data[0]))
 
@@ -40,12 +42,16 @@ func printTextTable(data [][]string) {
 
 func main() {
 	app := &cli.App{
-		Name:  "disko-demo",
-		Usage: "Play around or test disko",
+		Name:    "disko-demo",
+		Version: version,
+		Usage:   "Play around or test disko",
 		Commands: []*cli.Command{
 			&diskCommands,
 			&megaraidCommands,
+			&smartpqiCommands,
+			&mpi3mrCommands,
 			&lvmCommands,
+			&miscCommands,
 		},
 	}
 

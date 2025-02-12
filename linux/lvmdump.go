@@ -9,9 +9,7 @@ import (
 
 func readReportUint64(s string) uint64 {
 	// lvm --report-format=json --unit=B puts unit 'B' at end of all sizes.
-	if strings.HasSuffix(s, "B") {
-		s = s[:len(s)-1]
-	}
+	s = strings.TrimSuffix(s, "B")
 
 	num, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
@@ -61,9 +59,11 @@ func parsePvReport(report []byte) ([]lvmPVData, error) {
 	return d["report"][0]["pv"], nil
 }
 
-func getPvReport() ([]lvmPVData, error) {
-	out, stderr, rc := runCommandWithOutputErrorRc(
-		"lvm", "pvs", "--options=pv_all,vg_name", "--report-format=json", "--unit=B")
+func getPvReport(args ...string) ([]lvmPVData, error) {
+	cmd := []string{"lvm", "pvs", "--options=pv_all,vg_name", "--report-format=json", "--unit=B"}
+	cmd = append(cmd, args...)
+	out, stderr, rc := runCommandWithOutputErrorRc(cmd...)
+
 	if rc != 0 {
 		return []lvmPVData{},
 			fmt.Errorf("failed lvm pvs [%d]: %s\n%s", rc, out, stderr)
@@ -108,9 +108,10 @@ func parseVgReport(report []byte) ([]lvmVGData, error) {
 	return d["report"][0]["vg"], nil
 }
 
-func getVgReport() ([]lvmVGData, error) {
-	out, stderr, rc := runCommandWithOutputErrorRc(
-		"lvm", "vgs", "--options=vg_all", "--report-format=json", "--unit=B")
+func getVgReport(args ...string) ([]lvmVGData, error) {
+	cmd := []string{"lvm", "vgs", "--options=vg_all", "--report-format=json", "--unit=B"}
+	cmd = append(cmd, args...)
+	out, stderr, rc := runCommandWithOutputErrorRc(cmd...)
 
 	if rc != 0 {
 		return []lvmVGData{},
@@ -162,9 +163,10 @@ func parseLvReport(report []byte) ([]lvmLVData, error) {
 	return d["report"][0]["lv"], nil
 }
 
-func getLvReport() ([]lvmLVData, error) {
-	out, stderr, rc := runCommandWithOutputErrorRc(
-		"lvm", "lvs", "--options=lv_all,vg_name", "--report-format=json", "--unit=B")
+func getLvReport(args ...string) ([]lvmLVData, error) {
+	cmd := []string{"lvm", "lvs", "--options=lv_all,vg_name", "--report-format=json", "--unit=B"}
+	cmd = append(cmd, args...)
+	out, stderr, rc := runCommandWithOutputErrorRc(cmd...)
 
 	if rc != 0 {
 		return []lvmLVData{},

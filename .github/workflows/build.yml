@@ -5,22 +5,43 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-    - name: Set up Go 1.13
-      uses: actions/setup-go@v1
+    - name: Set up Go
+      uses: actions/setup-go@v4
       with:
-        go-version: 1.13
+        go-version: '1.22.x'
       id: go
 
     - name: Check out code into the Go module directory
       uses: actions/checkout@v1
 
-    - name: Test
+    - name: mod-download
       run: |
-        go test -race -covermode=atomic -coverprofile coverage.txt ./...
+        go mod download
+
+    - name: Install Deps
+      run: |
+        sudo apt-get update --quiet
+        sudo apt-get install --quiet --assume-yes --no-install-recommends lvm2 thin-provisioning-tools
+
+    - name: gofmt
+      run: |
+        make gofmt
+
+    - name: build
+      run: |
+        make build
+
+    - name: Unit Test
+      run: |
+        make test
+
+    - name: System Test
+      run: |
+        make test-all
 
     - name: Upload Coverage report to CodeCov
       if: success()
       uses: codecov/codecov-action@v1.0.0
       with:
-        token: 78b19480-8cfa-4f32-8448-b972a29a8f46
-        file: ./coverage.txt
+        token: 78b19480-8cfa-4f32-8448-b972a29a8f46 
+        file: ./coverage-all.txt

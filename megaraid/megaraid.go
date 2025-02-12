@@ -3,6 +3,8 @@ package megaraid
 import (
 	"encoding/json"
 	"errors"
+
+	"machinerun.io/disko"
 )
 
 // Controller - a Megaraid controller
@@ -131,10 +133,22 @@ func (t MediaType) MarshalJSON() ([]byte, error) {
 type MegaRaid interface {
 	// Query - Query the controller provided
 	Query(int) (Controller, error)
+
+	// GetDiskType - Determine the disk type if controller owns disk
+	GetDiskType(string) (disko.DiskType, error)
+
+	// DriverSysfsPath - Return the sysfs path to the linux driver for this controller
+	DriverSysfsPath() string
+
+	// IsSysPathRAID - Check if sysfs path is a device on the controller
+	IsSysPathRAID(string) bool
 }
 
 // ErrNoController - Error reported by Query if no controller is found.
 var ErrNoController = errors.New("megaraid Controller not found")
+
+// ErrUnsupported - Error reported by Query if controller is not supported.
+var ErrUnsupported = errors.New("megaraid Controller unsupported")
 
 // ErrNoStorcli - Error reported by Query if no storcli binary in PATH
 var ErrNoStorcli = errors.New("no 'storcli' command in PATH")

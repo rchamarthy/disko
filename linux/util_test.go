@@ -1,17 +1,17 @@
 package linux
 
 import (
-	"io/ioutil"
+	"os"
 	"testing"
 
-	"github.com/anuvu/disko"
 	"github.com/stretchr/testify/assert"
+	"machinerun.io/disko"
 )
 
-//nolint: lll
 func TestParseUdevInfo(t *testing.T) {
 	data := []byte(`P: /devices/virtual/block/dm-0
 N: dm-0
+M: dm-0
 S: disk/by-id/dm-name-nvme0n1p6_crypt
 S: disk/by-id/dm-uuid-CRYPT-LUKS1-b174c64e7a714359a8b56b79fb66e92b-nvme0n1p6_crypt
 S: disk/by-uuid/25df9069-80c7-46f4-a47c-305613c2cb6b
@@ -49,6 +49,7 @@ E: DEVNAME=/dev/dm-0
 func TestParseUdevInfo2(t *testing.T) {
 	data := []byte(`P: /devices/pci0000:00/..../block/sda
 N: sda
+M: sda
 S: disk/by-id/scsi-35000c500a0d8963f
 S: disk/by-id/wwn-0x5000c500a0d8963f
 S: disk/by-path/pci-0000:05:00.0-scsi-0:0:8:0
@@ -133,30 +134,32 @@ func TestRunCommand(t *testing.T) {
 
 func TestCeilingUp(t *testing.T) {
 	assert := assert.New(t)
-	assert.Equal(uint64(100), Ceiling(98, 4)) //nolint: gomnd
+	assert.Equal(uint64(100), Ceiling(98, 4))
 }
 
 func TestCeilingEven(t *testing.T) {
 	assert := assert.New(t)
-	assert.Equal(uint64(100), Ceiling(100, 4)) //nolint: gomnd
-	assert.Equal(uint64(97), Ceiling(97, 1))   //nolint: gomnd
+	assert.Equal(uint64(100), Ceiling(100, 4))
+	assert.Equal(uint64(97), Ceiling(97, 1))
 }
 
 func TestFloorDown(t *testing.T) {
 	assert := assert.New(t)
-	assert.Equal(uint64(96), Floor(98, 4)) //nolint: gomnd
+	assert.Equal(uint64(96), Floor(98, 4))
 }
 
 func TestFloorEven(t *testing.T) {
 	assert := assert.New(t)
-	assert.Equal(uint64(100), Floor(100, 4)) //nolint: gomnd
-	assert.Equal(uint64(97), Floor(97, 1))   //nolint: gomnd
+	assert.Equal(uint64(100), Floor(100, 4))
+	assert.Equal(uint64(97), Floor(97, 1))
 }
 
 func TestGetFileSize(t *testing.T) {
 	data := "This is my data in the file"
 
-	fp, err := ioutil.TempFile("", "testSize")
+	fp, err := os.CreateTemp("", "testSize")
+	defer os.Remove(fp.Name())
+
 	if err != nil {
 		t.Fatalf("Failed to make test file: %s", err)
 	}

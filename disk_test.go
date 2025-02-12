@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anuvu/disko"
-	"github.com/anuvu/disko/partid"
+	"machinerun.io/disko"
+	"machinerun.io/disko/partid"
 )
 
 func TestFreeSpaceSize(t *testing.T) {
@@ -47,29 +47,29 @@ func TestPartitionSize(t *testing.T) {
 
 func TestDiskString(t *testing.T) {
 	mib := disko.Mebibyte
-	gb := uint64(1000 * 1000 * 1000) // nolint: gomnd
+	gb := uint64(1000 * 1000 * 1000)
 
 	d := disko.Disk{
 		Name:       "sde",
 		Path:       "/dev/sde",
 		Size:       gb,
-		SectorSize: 512, //nolint: gomnd
+		SectorSize: 512,
 		Type:       disko.HDD,
 		Attachment: disko.ATA,
 		Partitions: disko.PartitionSet{
-			1: {Start: 3 * mib, Last: 253*mib - 1, Number: 1},   //nolint: gomnd
-			3: {Start: 500 * mib, Last: 600*mib - 1, Number: 3}, //nolint: gomnd
+			1: disko.Partition{Start: 3 * mib, Last: 253*mib - 1, Number: 1},
+			3: disko.Partition{Start: 500 * mib, Last: 600*mib - 1, Number: 3},
 		},
 		UdevInfo: disko.UdevInfo{},
 	}
 	found := " " + d.String() + " "
 
 	// disk size 1gb = 953 MiB. 600 = (253-3) + (953-600)
-	expectedFree := 600 // nolint: gomnd
+	expectedFree := 600
 
 	for _, substr := range []string{
 		fmt.Sprintf("Size=%d", gb),
-		fmt.Sprintf("FreeSpace=%dMiB/2", expectedFree), //nolint: gomnd
+		fmt.Sprintf("FreeSpace=%dMiB/2", expectedFree),
 		fmt.Sprintf("NumParts=%d", len(d.Partitions))} {
 		if !strings.Contains(found, " "+substr+" ") {
 			t.Errorf("%s: missing expected substring ' %s '", found, substr)
@@ -79,22 +79,33 @@ func TestDiskString(t *testing.T) {
 
 func TestDiskDetails(t *testing.T) {
 	mib := disko.Mebibyte
+
+	myType, err := disko.StringToGUID("9eb08654-de0e-4a63-967f-67a81d2ec0f0")
+	if err != nil {
+		t.Error(err)
+	}
+
 	d := disko.Disk{
 		Name:       "sde",
 		Path:       "/dev/sde",
 		Size:       mib * mib,
-		SectorSize: 512, //nolint: gomnd
+		SectorSize: 512,
 		Type:       disko.HDD,
 		Attachment: disko.ATA,
 		Partitions: disko.PartitionSet{
-			1: {Start: 3 * mib, Last: 253*mib - 1, Number: 1}, //nolint: gomnd
+			1: disko.Partition{Start: 3 * mib, Last: 253*mib - 1, Number: 1,
+				Name: "my-name", Type: partid.LinuxLVM},
+			2: disko.Partition{Start: 253 * mib, Last: 400*mib - 1, Number: 2,
+				Type: disko.PartType(myType)},
 		},
 		UdevInfo: disko.UdevInfo{},
 	}
 	expected := `
-[ # Start Last Size Name ]
-[ 1 3 MiB 253 MiB 250 MiB                 ]
-[ - 253 MiB 1048575 MiB 1048322 MiB <free> ]`
+[ # Start Last Size Name Type ]
+[ 1 3 MiB 253 MiB 250 MiB my-name LVM                ]
+[ 2 253 MiB 400 MiB 147 MiB N/A 9EB08654-DE0E-4A63-967F-67A81D2EC0F0 ]
+[ - 400 MiB 1048575 MiB 1048175 MiB <free> N/A ]
+`
 
 	spaces := regexp.MustCompile("[ ]+")
 	found := strings.TrimSpace(spaces.ReplaceAllString(d.Details(), " "))
@@ -135,6 +146,8 @@ func TestAttachmentTypeString(t *testing.T) {
 		{disko.USB, "USB"},
 		{disko.VIRTIO, "VIRTIO"},
 		{disko.IDE, "IDE"},
+		{disko.NBD, "NBD"},
+		{disko.LOOP, "LOOP"},
 	} {
 		found := d.dtype.String()
 		if found != d.expected {
@@ -150,7 +163,7 @@ func TestPartitionSerializeJson(t *testing.T) {
 	myIDStr := "01234567-89AB-CDEF-0123-456789ABCDEF"
 	myID, _ := disko.StringToGUID(myIDStr)
 	p := disko.Partition{
-		Start:  3 * disko.Mebibyte, //nolint:gomnd
+		Start:  3 * disko.Mebibyte,
 		Last:   253*disko.Mebibyte - 1,
 		ID:     myID,
 		Type:   partid.EFI,
@@ -196,8 +209,8 @@ func TestPartitionUnserializeJson(t *testing.T) {
 	}
 
 	expected := disko.Partition{
-		Start:  3 * disko.Mebibyte,     // nolint:gomnd
-		Last:   253*disko.Mebibyte - 1, // nolint:gomnd
+		Start:  3 * disko.Mebibyte,
+		Last:   253*disko.Mebibyte - 1,
 		ID:     myID,
 		Type:   partid.EFI,
 		Name:   "my system part",
@@ -215,8 +228,8 @@ func TestDiskSerializeJson(t *testing.T) {
 	d := disko.Disk{
 		Name:       "sda",
 		Path:       "/dev/sda",
-		Size:       500 * disko.Mebibyte, //nolint:gomnd
-		SectorSize: 512,                  //nolint:gomnd
+		Size:       500 * disko.Mebibyte,
+		SectorSize: 512,
 		Type:       disko.HDD,
 		Attachment: disko.ATA,
 	}
@@ -245,8 +258,8 @@ func TestDiskUnserializeJson(t *testing.T) {
 	expected := disko.Disk{
 		Name:       "sda",
 		Path:       "/dev/sda",
-		Size:       500 * disko.Mebibyte, //nolint:gomnd
-		SectorSize: 512,                  //nolint:gomnd
+		Size:       500 * disko.Mebibyte,
+		SectorSize: 512,
 		Type:       disko.HDD,
 		Attachment: disko.ATA,
 	}
@@ -275,6 +288,109 @@ func TestDiskUnserializeJson(t *testing.T) {
 
 		if !compareDisk(&found, &expected) {
 			t.Errorf("Objects differed. got %#v expected %#v\n", found, expected)
+		}
+	}
+}
+
+func checkPropertySetEqual(a, b disko.PropertySet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, v1 := range a {
+		if v2, ok := b[k]; ok != true || v1 != v2 {
+			return false
+		}
+	}
+
+	for k, v1 := range b {
+		if v2, ok := a[k]; ok != true || v1 != v2 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// Unmarshal either a list of strings or a PropertySet.
+func TestUnmarshalProperties(t *testing.T) {
+	tables := []struct {
+		input    string
+		expected disko.PropertySet
+		msg      string
+	}{
+		{
+			`["EPHEMERAL"]`,
+			disko.PropertySet{disko.Ephemeral: true},
+			"simple test",
+		},
+		{
+			`{"EPHEMERAL": true}`,
+			disko.PropertySet{disko.Ephemeral: true},
+			"map string:bool supported.",
+		},
+		{
+			`{"PROP1": true, "PROP2": false}`,
+			disko.PropertySet{disko.Property("PROP1"): true},
+			"false values dropped.",
+		},
+	}
+
+	for _, table := range tables {
+		found := disko.PropertySet{}
+
+		err := found.UnmarshalJSON([]byte(table.input))
+		if err != nil {
+			t.Errorf("UnmarshalJSON(%s) returned error %s", table.input, err)
+			continue
+		}
+
+		if !checkPropertySetEqual(found, table.expected) {
+			t.Errorf("UnmarshalJSON(%s) returned %#v. expected %#v (%s)",
+				table.input, found, table.expected, table.msg)
+		}
+
+		fmt.Printf("%s: found %#v\n", table.msg, table.expected)
+	}
+}
+
+// PropertySet should marshal into a sorted list of strings.
+func TestMarshalProperties(t *testing.T) {
+	tables := []struct {
+		input    disko.PropertySet
+		expected string
+		msg      string
+	}{
+		{
+			disko.PropertySet{disko.Ephemeral: true},
+			`["EPHEMERAL"]`,
+			"simple test",
+		},
+		{
+			disko.PropertySet{disko.Ephemeral: false, disko.Property("SILLY"): true},
+			`["SILLY"]`,
+			"false values are not included",
+		},
+		{
+			disko.PropertySet{
+				disko.Property("ARTSY"): true,
+				disko.Ephemeral:         true,
+				disko.Property("SILLY"): true},
+			`["ARTSY","EPHEMERAL","SILLY"]`,
+			"values are sorted",
+		},
+	}
+
+	for _, table := range tables {
+		found, err := table.input.MarshalJSON()
+		if err != nil {
+			t.Errorf("MarshalJSON(%v) returned error %s", table.input, err)
+			continue
+		}
+
+		if string(found) != table.expected {
+			t.Errorf("MarshalJSON(%v) returned %v. expected %v", table.input,
+				string(found), table.expected)
 		}
 	}
 }

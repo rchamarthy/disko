@@ -3,14 +3,14 @@ package mockos
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 
-	"github.com/anuvu/disko"
+	"machinerun.io/disko"
 )
 
 // System returns a mock os implementation of the disk.System interface.
 func System(layout string) disko.System {
-	file, err := ioutil.ReadFile(layout)
+	file, err := os.ReadFile(layout)
 	if err != nil {
 		panic(err)
 	}
@@ -82,6 +82,54 @@ func (ms *mockSys) CreatePartition(d disko.Disk, p disko.Partition) error {
 	}
 
 	return fmt.Errorf("disk %s does not exist", d.Name)
+}
+
+func (ms *mockSys) CreatePartitions(d disko.Disk, pSet disko.PartitionSet) error {
+	for _, p := range pSet {
+		if err := ms.CreatePartition(d, p); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (ms *mockSys) UpdatePartition(d disko.Disk, p disko.Partition) error {
+	cur, ok := d.Partitions[p.Number]
+
+	if !ok {
+		return fmt.Errorf("partition %d did not exist on disk %s", p.Number, d)
+	}
+
+	emptyGUID := disko.GUID{}
+	emptyType := disko.PartType{}
+	upd := cur
+
+	if p.Name != "" {
+		upd.Name = p.Name
+	}
+
+	if p.ID != emptyGUID {
+		upd.ID = p.ID
+	}
+
+	if p.Type != emptyType {
+		upd.Type = p.Type
+	}
+
+	d.Partitions[p.Number] = upd
+
+	return nil
+}
+
+func (ms *mockSys) UpdatePartitions(d disko.Disk, pSet disko.PartitionSet) error {
+	for _, p := range pSet {
+		if err := ms.UpdatePartition(d, p); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (ms *mockSys) DeletePartition(d disko.Disk, number uint) error {

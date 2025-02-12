@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/anuvu/disko"
-	"github.com/anuvu/disko/linux"
 	"github.com/urfave/cli/v2"
+	"machinerun.io/disko"
+	"machinerun.io/disko/linux"
 )
 
 //nolint:gochecknoglobals

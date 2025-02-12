@@ -4,17 +4,17 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/anuvu/disko"
 	"github.com/pkg/errors"
+	"machinerun.io/disko"
 )
 
 // GetUdevInfo return a UdevInfo for the device with kernel name kname.
@@ -47,15 +47,53 @@ func parseUdevInfo(out []byte, info *disko.UdevInfo) error {
 		}
 
 		toks = bytes.SplitN(line, []byte(": "), 2)
-		payload = string(toks[1])
 
+		if len(toks) != 2 {
+			log.Printf("parseUdevInfo: ignoring unparsable line %q\n", line)
+			continue
+		}
+
+		payload = string(toks[1])
 		switch toks[0][0] {
 		case 'P':
+			// Device path in /sys/
 			info.SysPath = payload
+		case 'M':
+			// Device name in /sys/ (i.e. the last component of "P:")
+			continue
+		case 'R':
+			// Device number in /sys/ (i.e. the numeric suffix of the last component of "P:")
+			continue
+		case 'U':
+			// Kernel subsystem
+			continue
+		case 'T':
+			// Kernel device type with subsystem
+			continue
+		case 'D':
+			// Kernel device node major/minor
+			continue
+		case 'I':
+			// Network interface index
+			continue
 		case 'N':
+			// Kernel device node name
 			info.Name = payload
+		case 'L':
+			// Device node symlink priority
+			continue
 		case 'S':
+			// Device node symlink
 			info.Symlinks = append(info.Symlinks, strings.Split(payload, " ")...)
+		case 'Q':
+			// Block device sequence number (DISKSEQ)
+			continue
+		case 'V':
+			// Attached driver
+			continue
+		case 'J':
+			// Device ID
+			continue
 		case 'E':
 			kv := strings.SplitN(payload, "=", 2)
 			// use of Unquote is to decode \x20, \x2f and friends.
@@ -68,7 +106,7 @@ func parseUdevInfo(out []byte, info *disko.UdevInfo) error {
 
 			info.Properties[kv[0]] = strings.TrimSpace(s)
 		default:
-			return fmt.Errorf("error parsing line: %v", line)
+			log.Printf("parseUdevInfo: ignoring unknown udevadm info prefix %q in %q\n", toks[0][0], line)
 		}
 	}
 
@@ -99,8 +137,22 @@ func cmdError(args []string, out []byte, err []byte, rc int) error {
 		return nil
 	}
 
-	return fmt.Errorf(
-		"command failed [%d]:\n cmd: %v\nout:%s\nerr%s",
+	return errors.New(cmdString(args, out, err, rc))
+}
+
+func cmdString(args []string, out []byte, err []byte, rc int) string {
+	tlen := len(err)
+	if tlen == 0 || err[tlen-1] != '\n' {
+		err = append(err, '\n')
+	}
+
+	tlen = len(out)
+	if tlen == 0 || out[tlen-1] != '\n' {
+		out = append(out, '\n')
+	}
+
+	return fmt.Sprintf(
+		"command returned %d:\n cmd: %v\n out: %s err: %s",
 		rc, args, out, err)
 }
 
@@ -129,7 +181,7 @@ func runCommandWithOutputErrorRcStdin(input string, args ...string) ([]byte, []b
 
 	go func() {
 		defer stdin.Close()
-		io.WriteString(stdin, input) // nolint:errcheck
+		io.WriteString(stdin, input) //nolint:errcheck
 	}()
 
 	var stdout, stderr bytes.Buffer
@@ -170,7 +222,11 @@ func pathExists(d string) bool {
 func getBlockSize(dev string) (uint64, error) {
 	path := path.Join("/sys/block", path.Base(dev), "queue/logical_block_size")
 
-	content, err := ioutil.ReadFile(path)
+	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return uint64(0), errors.Wrapf(err, "%s did not exist: is %s a disk?", path, dev)
+	}
+
 	if err != nil {
 		return uint64(0), errors.Wrapf(err, "Failed to read size for '%s'", dev)
 	}
@@ -233,4 +289,80 @@ func Floor(val, unit uint64) uint64 {
 	}
 
 	return (val / unit) * unit
+}
+
+// IsSysPathRAID - is this sys path (udevadm info's DEVPATH) on a scsi controller.
+//
+//	syspath will look something like
+//	   /devices/pci0000:3a/0000:3a:02.0/0000:3c:00.0/host0/target0:2:2/0:2:2:0/block/sdc
+func IsSysPathRAID(syspath string, driverSysPath string) bool {
+	if !strings.HasPrefix(syspath, "/sys") {
+		syspath = "/sys" + syspath
+	}
+
+	if !strings.Contains(syspath, "/host") {
+		return false
+	}
+
+	fp, err := filepath.EvalSymlinks(syspath)
+	if err != nil {
+		fmt.Printf("seriously? %s\n", err)
+		return false
+	}
+
+	for _, path := range GetSysPaths(driverSysPath) {
+		if strings.HasPrefix(fp, path) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// NameByDiskID - return the linux name (sda) for the disk with given DiskID
+func NameByDiskID(driverSysPath string, id int) (string, error) {
+	// given ID, we expect a single file in:
+	// <driverSysPath>/0000:05:00.0/host0/target0:0:<ID>/0:0:<ID>:0/block/
+	// Note: This does not work for some controllers such as a MegaRAID SAS3508
+	// See https://github.com/project-machine/disko/issues/101
+	idStr := fmt.Sprintf("%d", id)
+	blkDir := driverSysPath + "/*/host*/target0:0:" + idStr + "/0:0:" + idStr + ":0/block/*"
+	matches, err := filepath.Glob(blkDir)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(matches) != 1 {
+		return "", fmt.Errorf("found %d matches to %s", len(matches), blkDir)
+	}
+
+	return path.Base(matches[0]), nil
+}
+
+func GetSysPaths(driverSysPath string) []string {
+	paths := []string{}
+	// a raid driver has directory entries for each of the scsi hosts on that controller.
+	//   $cd /sys/bus/pci/drivers/<driver name>
+	//   $ for d in *; do [ -d "$d" ] || continue; echo "$d -> $( cd "$d" && pwd -P )"; done
+	//    0000:3c:00.0 -> /sys/devices/pci0000:3a/0000:3a:02.0/0000:3c:00.0
+	//    module -> /sys/module/<driver module name>
+
+	// We take a hack path and consider anything with a ":" in that dir as a host path.
+	matches, err := filepath.Glob(driverSysPath + "/*:*")
+
+	if err != nil {
+		fmt.Printf("errors: %s\n", err)
+		return paths
+	}
+
+	for _, p := range matches {
+		fp, err := filepath.EvalSymlinks(p)
+
+		if err == nil {
+			paths = append(paths, fp)
+		}
+	}
+
+	return paths
 }

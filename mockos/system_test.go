@@ -3,13 +3,13 @@ package mockos_test
 import (
 	"testing"
 
-	"github.com/anuvu/disko"
-	"github.com/anuvu/disko/mockos"
-	"github.com/anuvu/disko/partid"
 	. "github.com/smartystreets/goconvey/convey"
+	"machinerun.io/disko"
+	"machinerun.io/disko/mockos"
+	"machinerun.io/disko/partid"
 )
 
-//nolint: funlen, gomnd
+//nolint:funlen
 func TestSystem(t *testing.T) {
 	myID, _ := disko.StringToGUID("01234567-89AB-CDEF-0123-456789ABCDEF")
 
@@ -106,6 +106,64 @@ func TestSystem(t *testing.T) {
 			Convey("Calling CreatePartition with an existing partition should return error", func() {
 				err := sys.CreatePartition(disk, partition)
 				So(err, ShouldNotBeNil)
+			})
+		})
+
+		Convey("Calling CreatePartitions should create multiple partitions", func() {
+			disk := disko.Disk{
+				Name: "sda",
+			}
+			pSet := disko.PartitionSet{
+				1: disko.Partition{
+					Start:  0,
+					Last:   10000 - 1,
+					ID:     myID,
+					Type:   partid.LinuxFS,
+					Name:   "sda1",
+					Number: 1,
+				},
+				2: disko.Partition{
+					Start:  10000,
+					Last:   20000 - 1,
+					ID:     myID,
+					Type:   partid.LinuxFS,
+					Name:   "sda2",
+					Number: 2,
+				}}
+
+			// CreatePartition should probably only get the name
+			err := sys.CreatePartitions(disk, pSet)
+			So(err, ShouldBeNil)
+
+			d, _ := sys.ScanDisk("/dev/sda")
+			So(len(d.Partitions), ShouldEqual, len(pSet))
+			_, ok := d.Partitions[1]
+			So(ok, ShouldBeTrue)
+
+			_, ok = d.Partitions[2]
+			So(ok, ShouldBeTrue)
+
+			Convey("Calling DeletePartition should delete the partition with the specific number from a disk", func() {
+				disk := disko.Disk{
+					Name: "sda",
+				}
+
+				// DeletePartition should probably only get the name
+				err := sys.DeletePartition(disk, 1)
+				So(err, ShouldBeNil)
+
+				err = sys.DeletePartition(disk, 2)
+				So(err, ShouldBeNil)
+
+				err = sys.DeletePartition(disk, 10)
+				So(err, ShouldBeError)
+
+				d, _ := sys.ScanDisk("/dev/sda")
+				So(len(d.Partitions), ShouldEqual, 0)
+
+				disk.Name = "crap"
+				err = sys.DeletePartition(disk, 1)
+				So(err, ShouldBeError)
 			})
 		})
 

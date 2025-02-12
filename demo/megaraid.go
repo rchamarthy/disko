@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/anuvu/disko/megaraid"
 	"github.com/urfave/cli/v2"
+	"machinerun.io/disko/linux"
+	"machinerun.io/disko/megaraid"
 )
 
 //nolint:gochecknoglobals
@@ -26,6 +27,11 @@ var megaraidCommands = cli.Command{
 		},
 	},
 }
+
+const (
+	HDD = "HDD"
+	SSD = "SSD"
+)
 
 func megaraidDiskSummary(c *cli.Context) error {
 	var err error
@@ -49,13 +55,18 @@ func megaraidDiskSummary(c *cli.Context) error {
 	data := [][]string{{"Path", "Name", "Type", "State"}}
 
 	for _, vd := range ctrl.VirtDrives {
-		stype := "HDD"
+		stype := HDD
 
 		if ctrl.DriveGroups[vd.DriveGroup].IsSSD() {
-			stype = "SSD"
+			stype = SSD
 		}
 
-		data = append(data, []string{vd.Path, vd.RaidName, stype, vd.Raw["State"]})
+		name := vd.RaidName
+		if vd.RaidName == "" {
+			name = fmt.Sprintf("virtid-%d", vd.ID)
+		}
+
+		data = append(data, []string{vd.Path, name, stype, vd.Raw["State"]})
 	}
 
 	for _, d := range ctrl.Drives {
@@ -64,7 +75,7 @@ func megaraidDiskSummary(c *cli.Context) error {
 		}
 
 		path := ""
-		if bname, err := megaraid.NameByDiskID(d.ID); err == nil {
+		if bname, err := linux.NameByDiskID(mraid.DriverSysfsPath(), d.ID); err == nil {
 			path = "/dev/" + bname
 		}
 

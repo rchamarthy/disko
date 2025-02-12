@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anuvu/disko"
-	"github.com/anuvu/disko/mockos"
-	"github.com/anuvu/disko/partid"
 	. "github.com/smartystreets/goconvey/convey"
+	"machinerun.io/disko"
+	"machinerun.io/disko/mockos"
+	"machinerun.io/disko/partid"
 )
 
 func TestPV(t *testing.T) {
@@ -40,7 +40,7 @@ func TestPV(t *testing.T) {
 	})
 }
 
-//nolint: funlen
+//nolint:funlen
 func TestVG(t *testing.T) {
 	Convey("testing lvm VGs", t, func() {
 		sys := mockos.System("testdata/model_sys.json")
@@ -143,7 +143,7 @@ func TestVG(t *testing.T) {
 	})
 }
 
-//nolint: gomnd,funlen
+//nolint:funlen
 func TestLV(t *testing.T) {
 	Convey("test lvm lvs", t, func() {
 		sys := mockos.System("testdata/model_sys.json")

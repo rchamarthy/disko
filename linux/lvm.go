@@ -2,12 +2,17 @@ package linux
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"path"
 	"strings"
 
-	"github.com/anuvu/disko"
+	"machinerun.io/disko"
 )
+
+const pvMetaDataSize = 128 * disko.Mebibyte
+const thinPoolMetaDataSize = 1024 * disko.Mebibyte
 
 // VolumeManager returns the linux implementation of disko.VolumeManager interface.
 func VolumeManager() disko.VolumeManager {
@@ -18,9 +23,13 @@ type linuxLVM struct {
 }
 
 func (ls *linuxLVM) ScanPVs(filter disko.PVFilter) (disko.PVSet, error) {
+	return ls.scanPVs(filter)
+}
+
+func (ls *linuxLVM) scanPVs(filter disko.PVFilter, scanArgs ...string) (disko.PVSet, error) {
 	pvs := disko.PVSet{}
 
-	pvdatum, err := getPvReport()
+	pvdatum, err := getPvReport(scanArgs...)
 	if err != nil {
 		return pvs, err
 	}
@@ -36,12 +45,20 @@ func (ls *linuxLVM) ScanPVs(filter disko.PVFilter) (disko.PVSet, error) {
 }
 
 func (ls *linuxLVM) ScanVGs(filter disko.VGFilter) (disko.VGSet, error) {
+	return ls.scanVGs(filter)
+}
+
+func (ls *linuxLVM) scanVGs(filter disko.VGFilter, scanArgs ...string) (disko.VGSet, error) {
 	var vgdatum []lvmVGData
 	var vgs = disko.VGSet{}
 	var err error
 
-	vgdatum, err = getVgReport()
+	vgdatum, err = getVgReport(scanArgs...)
 	if err != nil {
+		return vgs, err
+	}
+
+	if len(vgdatum) == 0 {
 		return vgs, err
 	}
 
@@ -58,32 +75,64 @@ func (ls *linuxLVM) ScanVGs(filter disko.VGFilter) (disko.VGSet, error) {
 			continue
 		}
 
-		pvs, err := ls.ScanPVs(func(p disko.PV) bool { return p.VGName == name })
-		if err != nil {
-			return vgs, err
-		}
-
-		lvs, err := ls.ScanLVs(
-			func(d disko.LV) bool { return d.VGName == name })
-		if err != nil {
-			return vgs, err
-		}
-
-		vg.PVs = pvs
-		vg.Volumes = lvs
-
 		vgs[name] = vg
 	}
 
-	return vgs, nil
+	if len(vgs) == 0 {
+		return vgs, nil
+	}
+
+	fullVgs := disko.VGSet{}
+	lvSetsByVG := map[string]disko.LVSet{}
+	pvSetsByVG := map[string]disko.PVSet{}
+
+	lvs, err := ls.scanLVs(func(d disko.LV) bool { return true })
+
+	if err != nil {
+		return vgs, err
+	}
+
+	for _, lv := range lvs {
+		if _, ok := lvSetsByVG[lv.VGName]; ok {
+			lvSetsByVG[lv.VGName][lv.Name] = lv
+		} else {
+			lvSetsByVG[lv.VGName] = disko.LVSet{lv.Name: lv}
+		}
+	}
+
+	pvs, err := ls.scanPVs(func(d disko.PV) bool { return true })
+
+	if err != nil {
+		return vgs, err
+	}
+
+	for _, pv := range pvs {
+		if _, ok := pvSetsByVG[pv.VGName]; ok {
+			pvSetsByVG[pv.VGName][pv.Name] = pv
+		} else {
+			pvSetsByVG[pv.VGName] = disko.PVSet{pv.Name: pv}
+		}
+	}
+
+	for _, vg := range vgs {
+		vg.PVs = pvSetsByVG[vg.Name]
+		vg.Volumes = lvSetsByVG[vg.Name]
+		fullVgs[vg.Name] = vg
+	}
+
+	return fullVgs, nil
 }
 
 func (ls *linuxLVM) ScanLVs(filter disko.LVFilter) (disko.LVSet, error) {
+	return ls.scanLVs(filter)
+}
+
+func (ls *linuxLVM) scanLVs(filter disko.LVFilter, scanArgs ...string) (disko.LVSet, error) {
 	var lvdatum []lvmLVData
 	var lvs = disko.LVSet{}
 	var err error
 
-	lvdatum, err = getLvReport()
+	lvdatum, err = getLvReport(scanArgs...)
 	if err != nil {
 		return lvs, err
 	}
@@ -124,13 +173,14 @@ func (ls *linuxLVM) CreatePV(name string) (disko.PV, error) {
 		return nilPV, err
 	}
 
-	err = runCommandSettled("lvm", "pvcreate", "--zero=y", path)
+	err = runCommandSettled("lvm", "pvcreate", "--force", "--zero=y",
+		fmt.Sprintf("--metadatasize=%dB", pvMetaDataSize), path)
 
 	if err != nil {
 		return nilPV, err
 	}
 
-	pvs, err := ls.ScanPVs(getPVFilterByName(kname))
+	pvs, err := ls.scanPVs(func(d disko.PV) bool { return true }, path)
 	if err != nil {
 		return nilPV, err
 	}
@@ -144,11 +194,11 @@ func (ls *linuxLVM) CreatePV(name string) (disko.PV, error) {
 }
 
 func (ls *linuxLVM) DeletePV(pv disko.PV) error {
-	return runCommandSettled("lvm", "pvremove", "--force", pv.Path)
+	return runCommandSettled("lvm", "pvremove", "--force", "--force", "--yes", pv.Path)
 }
 
 func (ls *linuxLVM) HasPV(name string) bool {
-	pvs, err := ls.ScanPVs(getPVFilterByName(name))
+	pvs, err := ls.scanPVs(func(d disko.PV) bool { return true }, getPathForKname(name))
 	if err != nil {
 		return false
 	}
@@ -157,32 +207,47 @@ func (ls *linuxLVM) HasPV(name string) bool {
 }
 
 func (ls *linuxLVM) CreateVG(name string, pvs ...disko.PV) (disko.VG, error) {
-	cmd := []string{"lvm", "vgcreate", "--zero=y", name}
+	cmd := []string{"lvm", "vgcreate", "--force", "--zero=y",
+		fmt.Sprintf("--metadatasize=%dB", pvMetaDataSize), name}
+
 	for _, p := range pvs {
 		cmd = append(cmd, p.Path)
 	}
 
 	err := runCommandSettled(cmd...)
 	if err != nil {
-		return disko.VG{}, nil
+		return disko.VG{}, err
 	}
 
-	vgSet, err := ls.ScanVGs(getVGFilterByName(name))
+	vgSet, err := ls.scanVGs(func(d disko.VG) bool { return true }, name)
 
 	if err != nil {
-		return disko.VG{}, nil
+		return disko.VG{}, err
 	}
 
 	return vgSet[name], nil
 }
 
 func (ls *linuxLVM) ExtendVG(vgName string, pvs ...disko.PV) error {
-	cmd := []string{"lvm", "vgextend", "--zero=y", vgName}
+	// Have to create the PVs first in case they were dirty.
+	// pvcreate can be run on existing pvs.
+	// https://bugzilla.redhat.com/show_bug.cgi?id=2134912
+	pvPaths := []string{}
 	for _, p := range pvs {
-		cmd = append(cmd, p.Path)
+		pvPaths = append(pvPaths, p.Path)
 	}
 
+	cmd := append([]string{"lvm", "pvcreate", "--force", "--zero=y",
+		fmt.Sprintf("--metadatasize=%dB", pvMetaDataSize)}, pvPaths...)
+
 	err := runCommandSettled(cmd...)
+	if err != nil {
+		return err
+	}
+
+	cmd = append([]string{"lvm", "vgextend", "--zero=y", vgName}, pvPaths...)
+
+	err = runCommandSettled(cmd...)
 	if err != nil {
 		return err
 	}
@@ -195,7 +260,7 @@ func (ls *linuxLVM) RemoveVG(vgName string) error {
 }
 
 func (ls *linuxLVM) HasVG(vgName string) bool {
-	vgs, err := ls.ScanVGs(getVGFilterByName(vgName))
+	vgs, err := ls.scanVGs(func(d disko.VG) bool { return true }, vgName)
 	if err != nil {
 		return false
 	}
@@ -206,7 +271,7 @@ func (ls *linuxLVM) HasVG(vgName string) bool {
 func (ls *linuxLVM) CryptFormat(vgName string, lvName string, key string) error {
 	return runCommandStdin(
 		key,
-		"cryptsetup", "luksFormat", "--key-file=-", lvPath(vgName, lvName))
+		"cryptsetup", "luksFormat", "--type=luks2", "--key-file=-", lvPath(vgName, lvName))
 }
 
 func (ls *linuxLVM) CryptOpen(vgName string, lvName string,
@@ -221,6 +286,26 @@ func (ls *linuxLVM) CryptClose(vgName string, lvName string,
 	return runCommand("cryptsetup", "close", decryptedName)
 }
 
+func createLVCmd(args ...string) error {
+	return runCommandSettled(
+		append([]string{"lvm", "lvcreate", "--ignoremonitoring", "--yes", "--activate=y",
+			"--setactivationskip=n"}, args...)...)
+}
+
+func createThinPool(name string, vgName string, size uint64, mdSize uint64) error {
+	// thinpool takes up size + 2*mdSize
+	// https://www.redhat.com/archives/linux-lvm/2020-October/thread.html#00016
+	args := []string{}
+	// if mdSize is zero, let lvcreate choose the size. That is documented as:
+	//  (Pool_LV_size / Pool_LV_chunk_size * 64)
+	if mdSize != 0 {
+		args = append(args, fmt.Sprintf("--poolmetadatasize=%dB", mdSize))
+	}
+
+	return createLVCmd(append(args, "--zero=y", "--wipesignatures=y",
+		fmt.Sprintf("--size=%dB", size), "--thinpool="+name, vgName)...)
+}
+
 func (ls *linuxLVM) CreateLV(vgName string, name string, size uint64,
 	lvType disko.LVType) (disko.LV, error) {
 	nilLV := disko.LV{}
@@ -229,22 +314,42 @@ func (ls *linuxLVM) CreateLV(vgName string, name string, size uint64,
 		return nilLV, err
 	}
 
-	if lvType == disko.THIN {
-		// thin lv creation would require creating a pool
-		return nilLV, fmt.Errorf("not supported. Thin LV create not implemented")
+	nameFlag := "--name=" + name
+	sizeB := fmt.Sprintf("%dB", size)
+	vglv := vgLv(vgName, name)
+
+	// Missing cases: LVTypeUnknown
+	//exhaustive:ignore
+	switch lvType {
+	case disko.THIN:
+		// When creating THIN LV, the VG must be <vgname>/<thinLVName>
+		if !strings.Contains(vgName, "/") {
+			return nilLV,
+				fmt.Errorf("%s: vgName input for THIN LV name in format <vgname>/thinDataName", vgName)
+		}
+
+		vglv = vgLv(strings.Split(vgName, "/")[0], name)
+
+		// creation of thin volumes are always zero'd, and passing '--zero=y' will fail.
+		if err := createLVCmd("--virtualsize="+sizeB, nameFlag, vgName); err != nil {
+			return nilLV, err
+		}
+	case disko.THICK:
+		if err := createLVCmd("--zero=y", "--wipesignatures=y", "--size="+sizeB, nameFlag, vgName); err != nil {
+			return nilLV, err
+		}
+
+		if err := luks2Wipe(lvPath(vgName, name)); err != nil {
+			return nilLV, err
+		}
+	case disko.THINPOOL:
+		// When creating a THINPOOL, the name is the thin pool name.
+		if err := createThinPool(name, vgName, size, thinPoolMetaDataSize); err != nil {
+			return nilLV, err
+		}
 	}
 
-	err := runCommandSettled(
-		"lvm", "lvcreate", "--ignoremonitoring", "--yes", "--activate=y",
-		"--zero=y",
-		"--setactivationskip=n", fmt.Sprintf("--size=%dB", size),
-		fmt.Sprintf("--name=%s", name), vgName)
-
-	if err != nil {
-		return nilLV, err
-	}
-
-	lvs, err := ls.ScanLVs(getLVFilterByName(vgName, name))
+	lvs, err := ls.scanLVs(func(d disko.LV) bool { return true }, vglv)
 
 	if err != nil {
 		return nilLV, err
@@ -255,6 +360,46 @@ func (ls *linuxLVM) CreateLV(vgName string, name string, size uint64,
 	}
 
 	return lvs[name], nil
+}
+
+// luks2Wipe - wipe luks2 from a file/device.
+// libblkid (used by wipefs and lvm) did not gain full wiping of luks2 metadata until 2.33.
+// Wipe it more completely here.
+func luks2Wipe(fpath string) error {
+	const zeroLen = 64
+	bufZero := make([]byte, zeroLen)
+
+	// possible offsets for luks2 seconday headers from cryptsetup/lib/luks2/luks2.h
+	offsets := []int64{
+		0x04000, 0x008000, 0x010000, 0x020000, 0x40000,
+		0x080000, 0x100000, 0x200000, 0x400000}
+
+	return withLockedFile(fpath,
+		func(fp *os.File, fInfo os.FileInfo) error {
+			var wlen int64
+			fileLen, err := fp.Seek(0, io.SeekEnd)
+			if err != nil {
+				return err
+			}
+			for _, offset := range offsets {
+				wlen = zeroLen
+				if offset >= fileLen {
+					continue
+				} else if offset > (fileLen - zeroLen) {
+					wlen = fileLen - offset
+				}
+				if _, err := fp.Seek(offset, io.SeekStart); err != nil {
+					return err
+				}
+				if n, err := fp.Write(bufZero[:wlen]); err != nil {
+					return err
+				} else if n != int(wlen) {
+					return fmt.Errorf("short write on %s at offset %x. wrote %d, tried %d",
+						fpath, offset, n, zeroLen)
+				}
+			}
+			return nil
+		})
 }
 
 func (ls *linuxLVM) RenameLV(vgName string, lvName string, newLvName string) error {
@@ -268,34 +413,39 @@ func (ls *linuxLVM) RemoveLV(vgName string, lvName string) error {
 
 func (ls *linuxLVM) ExtendLV(vgName string, lvName string,
 	newSize uint64) error {
-	if err := isRoundExtent(newSize); err != nil {
+	var err error
+
+	if err = isRoundExtent(newSize); err != nil {
 		return err
 	}
 
-	return runCommandSettled(
+	err = runCommandSettled(
 		"lvm", "lvextend", fmt.Sprintf("--size=%dB", newSize),
 		vgLv(vgName, lvName))
+
+	if err != nil {
+		return err
+	}
+
+	if crypt, cryptName, _, err := getLuksInfo(lvPath(vgName, lvName)); err != nil {
+		return err
+	} else if crypt && cryptName != "" {
+		// luks device already opened, so resize it.
+		if err := runCommandSettled("cryptsetup", "resize", cryptName); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (ls *linuxLVM) HasLV(vgName string, name string) bool {
-	lvs, err := ls.ScanLVs(getLVFilterByName(vgName, name))
+	lvs, err := ls.scanLVs(func(d disko.LV) bool { return true }, vgLv(vgName, name))
 	if err != nil {
 		log.Panicf("Failed to scan logical volumes: %s", err)
 	}
 
 	return len(lvs) != 0
-}
-
-func getVGFilterByName(name string) disko.VGFilter {
-	return func(d disko.VG) bool { return d.Name == name }
-}
-
-func getPVFilterByName(name string) disko.PVFilter {
-	return func(d disko.PV) bool { return d.Name == name }
-}
-
-func getLVFilterByName(vgName string, name string) disko.LVFilter {
-	return func(d disko.LV) bool { return d.Name == name && d.VGName == vgName }
 }
 
 func isRoundExtent(size uint64) error {
@@ -317,6 +467,13 @@ func chompBytes(data []byte) []byte {
 	return data[:l-1]
 }
 
+// getLuksInfo - get luks information for the provided block device path)
+// returns:
+//
+//	crypt - boolean indicating if device is encrypted.
+//	cryptName - name of crypt dev if device is open - "" if not encrypted.
+//	cryptPath - path of crypt dev if device is open - "" if not encrypted.
+//	error - nil unless an error occurred.
 func getLuksInfo(devpath string) (bool, string, string, error) {
 	crypt := false
 
@@ -334,12 +491,13 @@ func getLuksInfo(devpath string) (bool, string, string, error) {
 	} else if rc != 0 {
 		return crypt, "", "", cmdError(cmd, stdout, stderr, rc)
 	}
+	// prefix looks like CRYPT-LUKS[12]-<luksUUID-without-spaces>-
+	bareID := strings.ReplaceAll(string(chompBytes(stdout)), "-", "")
+	luks1 := "CRYPT-LUKS1-" + bareID + "-"
+	luks2 := "CRYPT-LUKS2-" + bareID + "-"
 
 	crypt = true
 	minFields := 4
-	// prefix looks like CRYPT-LUKS1-<luksUUID-without-spaces>-
-	prefix := "CRYPT-LUKS1-" +
-		strings.ReplaceAll(string(chompBytes(stdout)), "-", "") + "-"
 
 	cmd = []string{"dmsetup", "table", "--concise"}
 	stdout, stderr, rc = runCommandWithOutputErrorRc(cmd...)
@@ -360,7 +518,7 @@ func getLuksInfo(devpath string) (bool, string, string, error) {
 					len(fields), minFields, record)
 		}
 
-		if strings.HasPrefix(fields[1], prefix) {
+		if strings.HasPrefix(fields[1], luks1) || strings.HasPrefix(fields[1], luks2) {
 			return crypt, fields[0], "/dev/mapper/" + fields[0], nil
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/patrickmn/go-cache"
+	"machinerun.io/disko"
 )
 
 type storCli struct {
@@ -43,14 +44,14 @@ type scResultSection struct {
 }
 
 func (sc *storCli) Query(cID int) (Controller, error) {
-	// run /c0/dall show all
+	// run /c0 show all
 	//   - get PDs and VDs
 	// run /c0/vall show all
 	//   - populate VD Properties and Path
 	var stdout, stderr []byte
 	var rc int
 
-	args := []string{fmt.Sprintf("/c%d/dall", cID), "show", "all", "nolog"}
+	args := []string{fmt.Sprintf("/c%d", cID), "show", "nolog"}
 
 	if stdout, stderr, rc = storcli(args...); rc != 0 {
 		var err error = ErrNoStorcli
@@ -74,6 +75,19 @@ func (sc *storCli) Query(cID int) (Controller, error) {
 	return newController(cID, cxDxOut, cxVxOut)
 }
 
+func (sc *storCli) DriverSysfsPath() string {
+	return SysfsPCIDriversPath
+}
+
+func (sc *storCli) GetDiskType(path string) (disko.DiskType, error) {
+	return disko.HDD, fmt.Errorf("missing controller to run query")
+}
+
+// not implemented in driver layer
+func (sc *storCli) IsSysPathRAID(syspath string) bool {
+	return false
+}
+
 func newController(cID int, cxDxOut string, cxVxOut string) (Controller, error) {
 	const pathPropName = "OS Drive Name"
 
@@ -81,13 +95,15 @@ func newController(cID int, cxDxOut string, cxVxOut string) (Controller, error) 
 		ID: cID,
 	}
 
-	vds, pds, err := parseCxDallShow(cxDxOut)
+	vds, pds, err := parseCxShow(cxDxOut)
 	if err != nil {
 		return ctrl, err
 	}
 
 	propMap, err := parseVirtProperties(cxVxOut)
-	if err != nil {
+	if err == ErrUnsupported {
+		propMap = map[int](map[string]string){}
+	} else if err != nil {
 		return ctrl, err
 	}
 
@@ -102,6 +118,10 @@ func newController(cID int, cxDxOut string, cxVxOut string) (Controller, error) 
 
 	for diskID, drive := range pds {
 		dgID := drive.DriveGroup
+		if dgID < 0 {
+			continue
+		}
+
 		dg, ok := ctrl.DriveGroups[dgID]
 
 		if ok {
@@ -122,9 +142,9 @@ func newController(cID int, cxDxOut string, cxVxOut string) (Controller, error) 
 
 // loadSections - parse a storcli output into sections.
 func loadSections(cmdOut string) []scResultSection {
-	var header bool = false
+	var header = false
 	var curSect scResultSection
-	var last string = ""
+	var last string
 
 	equalLine := regexp.MustCompile("^[=]+$")
 	rSects := []scResultSection{}
@@ -137,6 +157,8 @@ func loadSections(cmdOut string) []scResultSection {
 		{rsVirtDisk, regexp.MustCompile("^/c[0-9]+/v[0-9]+ :$")},
 		// PDs for VD 0
 		{rsPhysDisks, regexp.MustCompile("^PDs for VD [0-9]+ :$")},
+		// PD LIST (storcli /c0 show)
+		{rsPhysDisks, regexp.MustCompile("^PD LIST :$")},
 		// VD0 Properties (storcli /c0/vall show all)
 		{rsVirtProps, regexp.MustCompile("^.*VD[0-9]+ Properties :$")},
 		// VD LIST (storcli /c0/dall show all)
@@ -188,14 +210,15 @@ func loadSections(cmdOut string) []scResultSection {
 
 func parseKeyValData(lines []string) map[string]string {
 	data := map[string]string{}
+	const tokNum2 = 2
 
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
 
-		toks := strings.SplitN(line, " = ", 2)
-		if len(toks) != 2 { // nolint:gomnd
+		toks := strings.SplitN(line, " = ", tokNum2)
+		if len(toks) != tokNum2 {
 			continue
 		}
 
@@ -318,33 +341,50 @@ func cutTableLines(dataLines []string, cuts []int) []map[string]string {
 	return data
 }
 
-func parseCxDallShow(cmdOut string) (VirtDriveSet, DriveSet, error) {
+func isHeaderNotFound(header map[string]string) bool {
+	return header["Status"] == "Failure" &&
+		strings.Contains(header["Description"], "not found")
+}
+
+func isHeaderUnsupported(header map[string]string) bool {
+	return header["Status"] == "Failure" &&
+		strings.Contains(header["Description"], "Un-supported command")
+}
+
+func getHeaderError(header map[string]string) error {
+	if header["Status"] == "Success" {
+		return nil
+	}
+
+	if isHeaderNotFound(header) {
+		return ErrNoController
+	} else if isHeaderUnsupported(header) {
+		return ErrUnsupported
+	}
+
+	if _, err := strconv.Atoi(header["Controller"]); err != nil {
+		return fmt.Errorf("storcli controller in header not an int: %s", err)
+	}
+
+	return fmt.Errorf("storcli command returned status: %s", header["Status"])
+}
+
+// Parse the output of 'storcli /c0 show'
+func parseCxShow(cmdOut string) (VirtDriveSet, DriveSet, error) {
 	vds := VirtDriveSet{}
 	pds := DriveSet{}
-
-	var myHeader map[string]string
-	var err error
 
 	sections := loadSections(cmdOut)
 
 	for _, sect := range sections {
+		// Missing Cases: rsDgDriveList, rsUnknown, rsVirtDisk, rsVirtProps
+		//exhaustive:ignore
 		switch sect.Type {
 		case rsHeader:
-			myHeader = parseKeyValData(sect.Lines)
-
-			if myHeader["Status"] != "Success" {
-				if strings.Contains(myHeader["Description"], "not found") {
-					// Description = Controller 0 not found
-					return vds, pds, ErrNoController
-				}
-
-				return vds, pds,
-					fmt.Errorf("command failed. status: %s", myHeader["Status"])
+			if err := getHeaderError(parseKeyValData(sect.Lines)); err != nil {
+				return vds, pds, err
 			}
 
-			if _, err = strconv.Atoi(myHeader["Controller"]); err != nil {
-				return vds, pds, fmt.Errorf("controller in header not an int: %s", err)
-			}
 		case rsVdList:
 			data := parseTableData(sect.Lines)
 			for _, vdData := range data {
@@ -355,7 +395,7 @@ func parseCxDallShow(cmdOut string) (VirtDriveSet, DriveSet, error) {
 
 				vds[vd.ID] = &vd
 			}
-		case rsDgDriveList:
+		case rsPhysDisks:
 			data := parseTableData(sect.Lines)
 			for _, pdData := range data {
 				pd, err := pdDataToDrive(pdData)
@@ -372,10 +412,12 @@ func parseCxDallShow(cmdOut string) (VirtDriveSet, DriveSet, error) {
 }
 
 // parseVirtProperties - return properties map ("VD0 Properties") by VirtDrive ID
-//    cmdOut is output of 'storcli /c0/vall show all'
+//
+//	cmdOut is output of 'storcli /c0/vall show all'
 func parseVirtProperties(cmdOut string) (map[int](map[string]string), error) {
 	var vID int
 	var err error
+	const tokNum2 = 2
 
 	nameMatch := regexp.MustCompile("^VD([0-9]+) Properties$")
 	vdmap := map[int](map[string]string){}
@@ -383,23 +425,18 @@ func parseVirtProperties(cmdOut string) (map[int](map[string]string), error) {
 	sections := loadSections(cmdOut)
 
 	for _, sect := range sections {
+		// Missing cases: rsDgDriveList, rsPhysDisks, rsUnknown, rsVdList, rsVirtDisk
+		//exhaustive:ignore
 		switch sect.Type {
 		case rsHeader:
-			myHeader := parseKeyValData(sect.Lines)
-
-			if myHeader["Status"] != "Success" {
-				if strings.Contains(myHeader["Description"], "not found") {
-					// Description = Controller 0 not found
-					return vdmap, ErrNoController
-				}
-
-				return vdmap, fmt.Errorf("command failed. status: %s", myHeader["Status"])
+			if err := getHeaderError(parseKeyValData(sect.Lines)); err != nil {
+				return vdmap, err
 			}
 		case rsVirtProps:
 			// Extract the VirtDrive Number from the Name (VD0 Properties)
 			toks := nameMatch.FindStringSubmatch(sect.Name)
 
-			if len(toks) != 2 { // nolint: gomnd
+			if len(toks) != tokNum2 {
 				return vdmap, fmt.Errorf("failed parsing section '%s'", sect.Name)
 			}
 
@@ -448,20 +485,34 @@ func vdDataToVirtDrive(data map[string]string) (VirtDrive, error) {
 	}, nil
 }
 
+func parseDriveGroupVal(val string) (int, error) {
+	known := map[string]int{
+		"-": -1, // None
+		"F": -2, // Foreign
+	}
+
+	if found, ok := known[val]; ok {
+		return found, nil
+	}
+
+	return parseIntOrDash(val)
+}
+
 func pdDataToDrive(data map[string]string) (Drive, error) {
 	var err error
 	var dID, dg, eID, slot int
+	const tokNum2 = 2
 
 	if dID, err = parseIntOrDash(data["DID"]); err != nil {
 		return Drive{}, err
 	}
 
-	if dg, err = parseIntOrDash(data["DG"]); err != nil {
+	if dg, err = parseDriveGroupVal(data["DG"]); err != nil {
 		return Drive{}, err
 	}
 
-	toks := strings.SplitN(data["EID:Slt"], ":", 2)
-	if len(toks) != 2 { // nolint:gomnd
+	toks := strings.SplitN(data["EID:Slt"], ":", tokNum2)
+	if len(toks) != tokNum2 {
 		return Drive{},
 			fmt.Errorf(
 				"splitting EID:Slt data '%s' on ':'' returned %d fields, expected 2",
@@ -543,9 +594,11 @@ type cachingStorCli struct {
 
 // CachingStorCli - just a cache for a MegaRaid
 func CachingStorCli() MegaRaid {
+	const longTime = 5 * time.Minute
+
 	return &cachingStorCli{
 		mr:    &storCli{},
-		cache: cache.New(5*time.Minute, 5*time.Minute), //nolint: gomnd
+		cache: cache.New(longTime, longTime),
 	}
 }
 
@@ -567,4 +620,32 @@ func (csc *cachingStorCli) Query(cID int) (Controller, error) {
 	csc.cache.Set(cacheName, qresult{ctrl: ctrl, err: err}, cache.DefaultExpiration)
 
 	return ctrl, err
+}
+
+func (csc *cachingStorCli) GetDiskType(path string) (disko.DiskType, error) {
+	ctrl, err := csc.Query(0)
+	if err == nil {
+		for _, vd := range ctrl.VirtDrives {
+			if vd.Path == path {
+				if ctrl.DriveGroups[vd.DriveGroup].IsSSD() {
+					return disko.SSD, nil
+				}
+
+				return disko.HDD, nil
+			}
+		}
+	} else if err != ErrNoStorcli && err != ErrNoController && err != ErrUnsupported {
+		return disko.HDD, err
+	}
+
+	return disko.HDD, fmt.Errorf("cannot determine disk type")
+}
+
+func (csc *cachingStorCli) DriverSysfsPath() string {
+	return csc.mr.DriverSysfsPath()
+}
+
+// not implemented in the driver layer
+func (csc *cachingStorCli) IsSysPathRAID(syspath string) bool {
+	return false
 }

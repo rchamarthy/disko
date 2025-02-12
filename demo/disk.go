@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
-	"github.com/anuvu/disko"
-	"github.com/anuvu/disko/linux"
-	"github.com/anuvu/disko/partid"
 	"github.com/urfave/cli/v2"
+	"machinerun.io/disko"
+	"machinerun.io/disko/linux"
+	"machinerun.io/disko/partid"
 )
 
 //nolint:gochecknoglobals
@@ -21,9 +22,20 @@ var diskCommands = cli.Command{
 			Action: diskNewPartition,
 		},
 		{
-			Name:   "scan",
-			Usage:  "Scan disks on the system and dump data",
+			Name:   "dump",
+			Usage:  "Scan disks on the system and dump data (json)",
 			Action: diskScan,
+		},
+		{
+			Name:   "show",
+			Usage:  "Scan disks on the system and dump data (human)",
+			Action: diskShow,
+		},
+		{
+			Name: "wipe",
+			Usage: ("Quickly wipe disks on the system. Zero any existing " +
+				"beginning and end of disk and any existing partitions"),
+			Action: diskWipe,
 		},
 	},
 }
@@ -38,6 +50,7 @@ func diskScan(c *cli.Context) error {
 	}
 
 	if c.Args().Len() == 1 {
+		// a single argument will only output 1 disk, not an array of one disk.
 		disk, err := mysys.ScanDisk(c.Args().First())
 		if err != nil {
 			return err
@@ -68,6 +81,67 @@ func diskScan(c *cli.Context) error {
 	}
 
 	fmt.Printf("%s\n", string(jbytes))
+
+	return nil
+}
+
+func diskShow(c *cli.Context) error {
+	mysys := linux.System()
+	disks, err := getDiskSet(mysys, c.Args().Slice()...)
+
+	if err != nil {
+		return err
+	}
+
+	oDisks := []string{}
+	for _, d := range disks {
+		oDisks = append(oDisks, d.Name)
+	}
+
+	sort.Strings(oDisks)
+
+	for _, n := range oDisks {
+		d := disks[n]
+		fmt.Printf("%s\n%s\n", d.String(), d.Details())
+	}
+
+	return nil
+}
+
+func getDiskSet(mysys disko.System, paths ...string) (disko.DiskSet, error) {
+	matchAll := func(d disko.Disk) bool {
+		return true
+	}
+
+	return getDiskSetFilter(mysys, matchAll, paths...)
+}
+
+func getDiskSetFilter(mysys disko.System, matcher disko.DiskFilter, paths ...string) (disko.DiskSet, error) {
+	if len(paths) == 0 || (len(paths) == 1 && paths[0] == "all") {
+		return mysys.ScanAllDisks(matcher)
+	}
+
+	return mysys.ScanDisks(matcher, paths...)
+}
+
+func diskWipe(c *cli.Context) error {
+	mysys := linux.System()
+
+	// only match read-write disks here.
+	disks, err := getDiskSetFilter(
+		mysys,
+		func(d disko.Disk) bool { return !d.ReadOnly },
+		c.Args().Slice()...)
+
+	if err != nil {
+		return err
+	}
+
+	for _, d := range disks {
+		if err = mysys.Wipe(d); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
